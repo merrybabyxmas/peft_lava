@@ -20,6 +20,14 @@ import torch.nn.functional as F
 import math
 
 class LavaAdapter(nn.Module):
+    # 클래스 레벨에서 공유되는 seed (setup_seed에서 설정)
+    _global_seed = 42
+
+    @classmethod
+    def set_global_seed(cls, seed: int):
+        """모든 LavaAdapter 인스턴스의 generator seed를 설정"""
+        cls._global_seed = seed
+
     def __init__(self, hidden_size, rank, alpha):
         super().__init__()
         self.alpha = alpha
@@ -35,7 +43,7 @@ class LavaAdapter(nn.Module):
         # 입력 h와 곱해지는 가중치 없이, 오직 고정된 파라미터(Bias 역할)만 가집니다.
         # 이것이 곧 사용자님이 말씀하신 bias_logvar 역할을 합니다.
         self.logvar_bias = nn.Parameter(torch.ones(rank) * -6.0)
-        
+
         # Gating parameter
         self.gate_scale = nn.Parameter(torch.ones(rank))
 
@@ -44,6 +52,25 @@ class LavaAdapter(nn.Module):
         nn.init.zeros_(self.W_mu.bias) # mu의 초기 바이어스는 0
         nn.init.zeros_(self.W_o.weight)
         nn.init.zeros_(self.W_o.bias)
+
+        # 재현성을 위한 고정 seed generator (CPU에서 생성 후 GPU로 이동)
+        self._rng_generator = torch.Generator()
+        self._rng_generator.manual_seed(LavaAdapter._global_seed)
+
+    def reset_generator(self, seed: int = None):
+        """Generator를 초기 seed로 리셋 (에폭 시작 시 호출 가능)"""
+        if seed is not None:
+            self._rng_generator.manual_seed(seed)
+        else:
+            self._rng_generator.manual_seed(LavaAdapter._global_seed)
+
+    def _sample_noise(self, mu: torch.Tensor) -> torch.Tensor:
+        """
+        고정된 generator를 사용하여 재현 가능한 noise 샘플링
+        CPU에서 생성 후 target device로 이동
+        """
+        eps = torch.randn(mu.shape, generator=self._rng_generator, dtype=mu.dtype)
+        return eps.to(mu.device)
 
     def forward(self, h):
         if not isinstance(h, torch.Tensor):
@@ -59,7 +86,8 @@ class LavaAdapter(nn.Module):
         if self.training:
             # [Sampling] mu와 std가 준비되었으므로 샘플링 가능
             # Antithetic Sampling (z1, z2) 유지
-            eps = torch.randn_like(mu)
+            # 고정된 generator를 사용하여 재현 가능한 noise 생성
+            eps = self._sample_noise(mu)
             z1 = mu + eps * std
             z2 = mu - eps * std
             
