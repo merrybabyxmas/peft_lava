@@ -20,12 +20,10 @@ import torch.nn.functional as F
 import math
 
 class LavaAdapter(nn.Module):
-    # 클래스 레벨에서 공유되는 seed (setup_seed에서 설정)
     _global_seed = 42
 
     @classmethod
     def set_global_seed(cls, seed: int):
-        """모든 LavaAdapter 인스턴스의 generator seed를 설정"""
         cls._global_seed = seed
 
     def __init__(self, hidden_size, rank, alpha):
