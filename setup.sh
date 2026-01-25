@@ -1,46 +1,85 @@
 #!/bin/bash
 set -e
 
-echo "🚀 Starting PEFT_LAVA installation with check-and-skip logic..."
+echo "========================================"
+echo " PEFT_LAVA Installation"
+echo "========================================"
+
+# Conda 활성화 함수
+init_conda() {
+    if [ -f "$(conda info --base)/etc/profile.d/conda.sh" ]; then
+        source "$(conda info --base)/etc/profile.d/conda.sh"
+    else
+        echo "Error: Conda not found. Please install Miniconda or Anaconda first."
+        exit 1
+    fi
+}
+
+init_conda
 
 # 1. 환경 생성 확인
-if conda env list | grep -q "lava"; then
-    echo "✅ Conda environment 'lava' already exists. Skipping creation."
+if conda env list | grep -q "^lava "; then
+    echo "[OK] Conda environment 'lava' already exists."
 else
-    echo "Creating conda environment 'lava'..."
-    conda create -n lava python=3.10.19 -y
+    echo "[..] Creating conda environment 'lava' with Python 3.10..."
+    conda create -n lava python=3.10 -y
 fi
 
 # 환경 활성화
-source $(conda info --base)/etc/profile.d/conda.sh
 conda activate lava
+echo "[OK] Activated 'lava' environment"
 
-# 2. PyTorch 설치 여부 확인 (특히 RTX 5090용 cu128 확인)
+# 2. PyTorch 설치 여부 확인
 if python -c "import torch; print(torch.__version__)" &>/dev/null; then
-    echo "✅ PyTorch is already installed. Skipping PyTorch installation."
+    TORCH_VER=$(python -c "import torch; print(torch.__version__)")
+    echo "[OK] PyTorch $TORCH_VER is already installed."
 else
-    GPU_INFO=$(nvidia-smi --query-gpu=name --format=csv,noheader,nounits | head -n1 2>/dev/null || echo "No GPU")
-    if echo "$GPU_INFO" | grep -q "RTX 5090\|RTX 6000 Ada\|RTX 6090"; then
-        echo "✨ Blackwell GPU detected - Installing PyTorch Nightly (cu128)..."
+    # GPU 감지
+    GPU_INFO=$(nvidia-smi --query-gpu=name --format=csv,noheader,nounits 2>/dev/null | head -n1 || echo "No GPU")
+    echo "[..] Detected GPU: $GPU_INFO"
+
+    if echo "$GPU_INFO" | grep -qE "RTX 50|Blackwell"; then
+        echo "[..] Blackwell/RTX 50 series detected - Installing PyTorch Nightly (cu128)..."
         pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
     else
-        echo "Installing standard PyTorch (cu124)..."
+        echo "[..] Installing PyTorch (cu124)..."
         pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
     fi
 fi
 
-# 3. PEFT_LAVA 패키지 설치 여부 확인
+# 3. 기존 peft 제거 (충돌 방지)
 if pip show peft &>/dev/null; then
-    echo "✅ PEFT package is already installed. Skipping 'pip install -e .'"
+    PEFT_LOC=$(pip show peft | grep "Editable project location" || echo "")
+    if echo "$PEFT_LOC" | grep -q "peft_lava"; then
+        echo "[OK] Custom PEFT_LAVA is already installed."
+    else
+        echo "[..] Removing existing peft package to avoid conflicts..."
+        pip uninstall peft -y
+        echo "[..] Installing PEFT_LAVA in editable mode..."
+        pip install -e .
+    fi
 else
-    echo "Installing PEFT_LAVA in editable mode..."
+    echo "[..] Installing PEFT_LAVA in editable mode..."
     pip install -e .
 fi
 
-# 4. 심볼릭 링크 설정 (강제 갱신으로 경로 무결성 유지)
-ENV_PATH=$(conda info --base)/envs/lava/lib/python3.10/site-packages
-echo "Setting up symbolic links..."
-rm -rf "$ENV_PATH/peft"
-ln -sf $(pwd)/peft "$ENV_PATH/peft"
+# 4. 설치 확인
+echo ""
+echo "========================================"
+echo " Verifying Installation"
+echo "========================================"
+python -c "
+import peft
+print(f'[OK] peft version: {peft.__version__}')
+print(f'[OK] peft location: {peft.__file__}')
+"
 
-echo "✅ PEFT_LAVA Setup complete!"
+echo ""
+echo "========================================"
+echo " PEFT_LAVA Setup Complete!"
+echo "========================================"
+echo ""
+echo "Next steps:"
+echo "  cd ../lava"
+echo "  pip install -r requirements.txt"
+echo ""
