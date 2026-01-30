@@ -32,8 +32,8 @@ class LavaFullWeightAdapter(nn.Module):
         # 2. Low-rank Projection for Log-Variance (FullWeight: 입력 의존적 분산)
         self.W_logvar = nn.Linear(hidden_size, rank, bias=True)
 
-        # 3. Output projection
-        self.W_o = nn.Linear(rank, hidden_size, bias=True)
+        # 3. Output projection (no bias for fair comparison with LoRA)
+        self.W_o = nn.Linear(rank, hidden_size, bias=False)
 
         # 4. 재현성을 위한 개별 Generator
         self._rng_generator = torch.Generator()
@@ -45,7 +45,6 @@ class LavaFullWeightAdapter(nn.Module):
         nn.init.kaiming_uniform_(self.W_logvar.weight, a=math.sqrt(5))
         nn.init.constant_(self.W_logvar.bias, -6.0)  # 초기에는 작은 분산
         nn.init.zeros_(self.W_o.weight)
-        nn.init.zeros_(self.W_o.bias)
 
         # 트레이너 수집용 변수
         self._last_mu = None

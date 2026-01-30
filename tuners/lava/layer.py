@@ -25,8 +25,9 @@ class LavaAdapter(nn.Module):
         self.scale = self.alpha / rank
 
         # 1. Low-rank Projection (W_mu: 입력의 평균점 매핑, W_o: 원래 차원 복구)
+        # NOTE: W_o has no bias for fair comparison with LoRA (which has no bias in B matrix)
         self.W_mu = nn.Linear(hidden_size, rank, bias=True)
-        self.W_o = nn.Linear(rank, hidden_size, bias=True)
+        self.W_o = nn.Linear(rank, hidden_size, bias=False)
 
         # 2. Input-invariant Variance (모든 입력에 대해 동일한 기저 노이즈 수준 학습)
         self.logvar_bias = nn.Parameter(torch.ones(rank) * -6.0)
@@ -39,7 +40,6 @@ class LavaAdapter(nn.Module):
         nn.init.kaiming_uniform_(self.W_mu.weight, a=math.sqrt(5))
         nn.init.zeros_(self.W_mu.bias)
         nn.init.zeros_(self.W_o.weight)
-        nn.init.zeros_(self.W_o.bias)
 
         # 트레이너 수집용 변수 (LavaBaseTrainer 호환용)
         self._last_mu = None
