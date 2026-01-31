@@ -241,6 +241,11 @@ class AdaLoraModel(LoraModel):
             return getattr(self.model, name)
 
     def forward(self, *args, **kwargs):
+        # ViT compatibility: remove input_ids, attention_mask, inputs_embeds when pixel_values is present
+        if "pixel_values" in kwargs:
+            kwargs.pop("input_ids", None)
+            kwargs.pop("attention_mask", None)
+            kwargs.pop("inputs_embeds", None)
         outputs = self.model.forward(*args, **kwargs)
 
         if (getattr(outputs, "loss", None) is not None) and isinstance(outputs.loss, torch.Tensor):

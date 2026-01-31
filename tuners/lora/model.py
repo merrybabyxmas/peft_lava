@@ -409,6 +409,19 @@ class LoraModel(BaseTuner):
                 warnings.warn(msg)
         self._set_adapter_layers(enabled=False)
 
+    def forward(self, *args, **kwargs):
+        """
+        Forward pass with ViT compatibility.
+        For image models (ViT, etc.) that use pixel_values instead of input_ids,
+        we need to remove NLU-specific arguments to avoid errors.
+        """
+        # ViT compatibility: remove input_ids, attention_mask, inputs_embeds when pixel_values is present
+        if "pixel_values" in kwargs:
+            kwargs.pop("input_ids", None)
+            kwargs.pop("attention_mask", None)
+            kwargs.pop("inputs_embeds", None)
+        return self.model.forward(*args, **kwargs)
+
     def set_adapter(self, adapter_name: str | list[str]) -> None:
         """Set the active adapter(s).
 
