@@ -9,6 +9,7 @@ class LavaFullWeightConfig(PeftConfig):
         target_modules=None,
         bias="none",
         inference_mode=False,
+        lora_dropout=0.0,
         **kwargs
     ):
         self.modules_to_save = []
@@ -22,6 +23,7 @@ class LavaFullWeightConfig(PeftConfig):
         self.target_modules = target_modules
         self.bias = bias
         self.inference_mode = inference_mode
+        self.lora_dropout = lora_dropout
 
         if not hasattr(self, "task_type") or self.task_type is None:
             self.task_type = kwargs.get("task_type", "SEQ_CLS")

@@ -62,12 +62,14 @@ class LavaFullWeightModel(BaseTuner):
 
         rank = peft_config.r
         alpha = peft_config.alpha
+        lora_dropout = getattr(peft_config, 'lora_dropout', 0.0)
 
         new_module = LavaFullWeightLayer(
             base_layer=target,
             adapter_name=adapter_name,
             rank=rank,
             alpha=alpha,
+            lora_dropout=lora_dropout,
         )
 
         setattr(parent, target_name, new_module)
