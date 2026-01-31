@@ -112,6 +112,7 @@ class LavaModel(BaseTuner):
         # r 가져오기
         rank = peft_config.r
         alpha = peft_config.alpha
+        lora_dropout = getattr(peft_config, 'lora_dropout', 0.0)
 
         # 새로운 LavaLayer 생성
         new_module = LavaLayer(
@@ -119,6 +120,7 @@ class LavaModel(BaseTuner):
             adapter_name=adapter_name,
             rank=rank,
             alpha=alpha,
+            lora_dropout=lora_dropout,
         )
 
         # parent 모듈에 교체 반영

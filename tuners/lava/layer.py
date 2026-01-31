@@ -18,7 +18,7 @@ class LavaAdapter(nn.Module):
         """모든 LavaAdapter 인스턴스의 기본 시드를 설정"""
         cls._global_seed = seed
 
-    def __init__(self, hidden_size: int, rank: int, alpha: int):
+    def __init__(self, hidden_size: int, rank: int, alpha: int, lora_dropout: float = 0.0):
         super().__init__()
         self.alpha = alpha
         self.rank = rank
@@ -35,6 +35,9 @@ class LavaAdapter(nn.Module):
         # 3. 재현성을 위한 개별 Generator (CPU에서 생성 후 GPU 이동하는 안전한 방식)
         self._rng_generator = torch.Generator()
         self._rng_generator.manual_seed(LavaAdapter._global_seed)
+
+        # 4. Dropout (for fair comparison with LoRA)
+        self.lora_dropout = nn.Dropout(p=lora_dropout) if lora_dropout > 0.0 else nn.Identity()
 
         # 초기화 (Kaiming Uniform 사용)
         nn.init.kaiming_uniform_(self.W_mu.weight, a=math.sqrt(5))
@@ -72,6 +75,9 @@ class LavaAdapter(nn.Module):
     def forward(self, h: torch.Tensor, external_noise: Optional[torch.Tensor] = None):
         if not isinstance(h, torch.Tensor):
             return h
+
+        # Apply dropout to input (same as LoRA)
+        h = self.lora_dropout(h)
 
         # [Mean] mu = W_mu * h + bias_mu
         mu = self.W_mu(h)
@@ -117,7 +123,7 @@ class LavaLayer(BaseTunerLayer, nn.Module):
     is_adapter = True
     adapter_layer_names = ("lava",)
 
-    def __init__(self, base_layer: nn.Linear, adapter_name: str, rank: int, alpha: int):
+    def __init__(self, base_layer: nn.Linear, adapter_name: str, rank: int, alpha: int, lora_dropout: float = 0.0):
         nn.Module.__init__(self)
         BaseTunerLayer.__init__(self)
 
@@ -130,7 +136,7 @@ class LavaLayer(BaseTunerLayer, nn.Module):
 
         out_dim = base_layer.out_features
         self.lava = nn.ModuleDict({
-            adapter_name: LavaAdapter(out_dim, rank, alpha)
+            adapter_name: LavaAdapter(out_dim, rank, alpha, lora_dropout)
         })
 
         self._active_adapters = [adapter_name]

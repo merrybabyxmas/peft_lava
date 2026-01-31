@@ -8,6 +8,7 @@ class LavaConfig(PeftConfig):
         target_modules=None,
         bias="none",
         inference_mode=False,
+        lora_dropout=0.0,
         **kwargs
     ):
         # wrapper 비활성화
@@ -25,6 +26,7 @@ class LavaConfig(PeftConfig):
         self.target_modules = target_modules
         self.bias = bias
         self.inference_mode = inference_mode
+        self.lora_dropout = lora_dropout
 
         # task_type 기본값 설정
         if not hasattr(self, "task_type") or self.task_type is None:
