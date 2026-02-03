@@ -5,17 +5,11 @@ import math
 from typing import Optional
 from peft.tuners.tuners_utils import BaseTunerLayer
 
-# ==========================================================
-#   Optimized Lava Adapter (Gating Removed & Seeding Utils)
-# ==========================================
-
 class LavaAdapter(nn.Module):
-    # 클래스 레벨에서 공유되는 기본 시드
     _global_seed = 42
 
     @classmethod
     def set_global_seed(cls, seed: int):
-        """모든 LavaAdapter 인스턴스의 기본 시드를 설정"""
         cls._global_seed = seed
 
     def __init__(self, hidden_size: int, rank: int, alpha: int, lora_dropout: float = 0.0):
@@ -24,99 +18,84 @@ class LavaAdapter(nn.Module):
         self.rank = rank
         self.scale = self.alpha / rank
 
-        # 1. Low-rank Projection (W_mu: 입력의 평균점 매핑, W_o: 원래 차원 복구)
-        # NOTE: W_o has no bias for fair comparison with LoRA (which has no bias in B matrix)
-        self.W_mu = nn.Linear(hidden_size, rank, bias=True)
-        self.W_o = nn.Linear(rank, hidden_size, bias=False)
+        # [1] 가중치 행렬 분리 (수식의 W_A와 B)
+        # W_A 연산에서 bias를 False로 설정하여 입력 투영만 수행합니다.
+        self.W_A = nn.Linear(hidden_size, rank, bias=False) 
+        self.W_B = nn.Linear(rank, hidden_size, bias=False)
 
-        # 2. Input-invariant Variance (모든 입력에 대해 동일한 기저 노이즈 수준 학습)
-        self.logvar_bias = nn.Parameter(torch.ones(rank) * -6.0)
+        # [2] 순수 Bias 파라미터 (이것이 VIB의 대상이 됩니다)
+        self.b_mu = nn.Parameter(torch.zeros(rank))
+        self.b_logvar = nn.Parameter(torch.ones(rank) * -6.0)
+        self.gate_scale = nn.Parameter(torch.ones(rank))
 
-        # 3. 재현성을 위한 개별 Generator (CPU에서 생성 후 GPU 이동하는 안전한 방식)
+        # [3] Dropout & Generator
+        self.lora_dropout = nn.Dropout(p=lora_dropout) if lora_dropout > 0.0 else nn.Identity()
         self._rng_generator = torch.Generator()
         self._rng_generator.manual_seed(LavaAdapter._global_seed)
 
-        # 4. Dropout (for fair comparison with LoRA)
-        self.lora_dropout = nn.Dropout(p=lora_dropout) if lora_dropout > 0.0 else nn.Identity()
+        # 초기화
+        nn.init.kaiming_uniform_(self.W_A.weight, a=math.sqrt(5))
+        nn.init.zeros_(self.W_B.weight)
+        nn.init.zeros_(self.b_mu)
 
-        # 초기화 (Kaiming Uniform 사용)
-        nn.init.kaiming_uniform_(self.W_mu.weight, a=math.sqrt(5))
-        nn.init.zeros_(self.W_mu.bias)
-        nn.init.zeros_(self.W_o.weight)
-
-        # 트레이너 수집용 변수 (LavaBaseTrainer 호환용)
         self._last_mu = None
         self._last_logvar = None
         self._latent_stability = None
-
+    
     def reset_generator(self, seed: Optional[int] = None):
-        """Generator의 상태를 초기화하여 노이즈 순서를 리셋"""
         target_seed = seed if seed is not None else LavaAdapter._global_seed
         self._rng_generator.manual_seed(target_seed)
 
     def _sample_noise(self, mu: torch.Tensor) -> torch.Tensor:
-        """
-        고정된 generator를 사용하여 재현 가능한 noise 샘플링.
-        Generator와 mu의 장치가 일치하도록 보장합니다.
-        """
-        # 현재 제너레이터의 장치가 mu의 장치와 다르면 해당 장치용으로 새로 생성
+        """장치(Device) 불일치를 방지하며 노이즈 샘플링"""
         if self._rng_generator.device != mu.device:
             self._rng_generator = torch.Generator(device=mu.device)
-            # 기존 시드를 유지하여 재현성 확보
             self._rng_generator.manual_seed(LavaAdapter._global_seed)
+        return torch.randn(mu.shape, generator=self._rng_generator, dtype=mu.dtype, device=mu.device)
 
-        return torch.randn(
-            mu.shape, 
-            generator=self._rng_generator, 
-            dtype=mu.dtype, 
-            device=mu.device
-        )
-
-    def forward(self, h: torch.Tensor, external_noise: Optional[torch.Tensor] = None):
+    def forward(self, h: torch.Tensor):
         if not isinstance(h, torch.Tensor):
             return h
 
-        # Apply dropout to input (same as LoRA)
-        h = self.lora_dropout(h)
+        # Step 1: 입력 데이터 처리 (Deterministic Path)
+        h_latent = self.lora_dropout(h)
+        # 입력에 의존하는 투영값 (W_A * x)
+        proj_h = self.W_A(h_latent)
 
-        # [Mean] mu = W_mu * h + bias_mu
-        mu = self.W_mu(h)
-        
-        # [Log-var] 입력 독립적 분산 파라미터 (Clamp로 수치 안정성 확보)
-        logvar = torch.clamp(self.logvar_bias, -10, 2)
+        # Step 2: Bias 샘플링 (Stochastic Path)
+        logvar = torch.clamp(self.b_logvar, -10, 2)
         std = torch.exp(0.5 * logvar)
 
         if self.training:
-            # [속도 최적화] 외부에서 주입된 노이즈가 있으면 사용(RNG 호출 횟수 감소)
-            # 없을 경우 내부 Generator 또는 randn_like로 폴백
-            if external_noise is not None:
-                eps = external_noise
-            else:
-                eps = self._sample_noise(mu)
+            # 입력 h와 상관없이 b_mu 크기에 맞춘 노이즈 생성
+            eps = self._sample_noise(self.b_mu)
+            # Antithetic Sampling (Bias만 흔듦)
+            b_A_pos = self.b_mu + eps * std
+            b_A_neg = self.b_mu - eps * std
             
-            # Antithetic Sampling (z1, z2)
-            z1 = mu + eps * std
-            z2 = mu - eps * std
-            
-            # Latent Stability 계산 (내부 MSE Loss)
-            self._latent_stability = F.mse_loss(z1, z2)
-            z = z1 
+            self._latent_stability = F.mse_loss(b_A_pos, b_A_neg)
+            b_A = b_A_pos
         else:
-            # 추론 시에는 결정론적(Deterministic)으로 동작
-            z = mu
+            b_A = self.b_mu
             self._latent_stability = None
 
-        # [Output] 시그모이드 게이트를 제거하고 샘플 z를 직접 투영
-        delta = self.W_o(z) * self.scale
+        # Step 3: 결합 및 게이팅
+        # latent = (W_A * x) + b_A
+        latent = proj_h + b_A
         
-        # 트레이너 수집용 데이터 저장
-        self._last_mu = mu
-        self._last_logvar = logvar.expand_as(mu) 
+        # 게이팅은 잠재 공간의 활성화 정도를 조절
+        # gate = torch.sigmoid(latent * self.gate_scale)
+        gate = 1
+        delta = self.W_B(latent * gate) * self.scale
+        
+        # [핵심] Step 4: VIB Loss용 데이터 저장
+        # 이제 _last_mu는 입력 h를 포함하지 않는 순수 Bias 파라미터입니다.
+        self._last_mu = self.b_mu
+        self._last_logvar = logvar 
         
         return h + delta
-
 # ==========================================================
-#   LavaLayer Wrapper (Adapter Management)
+#   LavaLayer Wrapper (PEFT 호환)
 # ==========================================================
 
 class LavaLayer(BaseTunerLayer, nn.Module):
@@ -131,10 +110,12 @@ class LavaLayer(BaseTunerLayer, nn.Module):
             raise TypeError("LavaLayer can only wrap nn.Linear layers.")
 
         self.base_layer = base_layer
+        # 베이스 모델 가중치 고정
         for p in self.base_layer.parameters():
             p.requires_grad = False
 
         out_dim = base_layer.out_features
+        # LavaAdapter 생성 시 lora_dropout 전달
         self.lava = nn.ModuleDict({
             adapter_name: LavaAdapter(out_dim, rank, alpha, lora_dropout)
         })
@@ -166,12 +147,9 @@ class LavaLayer(BaseTunerLayer, nn.Module):
         if not isinstance(h, torch.Tensor) or self.disable_adapters:
             return h
 
-        # 2. Trainer에서 넘겨준 external_noise 추출
-        external_noise = kwargs.get("external_noise", None)
-
-        # 3. 활성화된 모든 어댑터 적용
+        # 2. 어댑터 연산 (LavaAdapter 내부에서 h + delta 수행)
         for name in self.active_adapters:
             if name in self.lava:
-                h = self.lava[name](h, external_noise=external_noise)
+                h = self.lava[name](h)
         
         return h
